@@ -4,131 +4,176 @@ import * as vscode from "vscode";
 const cp = require("child_process");
 const packageJson = require("../package.json");
 
-let log: ReturnType<typeof logger>;
+let log: ReturnType<(typeof HelperFunctions)["createLogger"]>;
 
-// this method is called when your extension is activated
-// your extension is activated the very first time the command is executed
+const disposable = vscode.workspace.onWillRenameFiles(async (event) => {
+  try {
+    for (const file of event.files) {
+      const oldPath = HelperFunctions.removeInitialSlash(file.oldUri.path);
+      const newPath = HelperFunctions.removeInitialSlash(file.newUri.path);
+      const oldPathWithoutFilename = oldPath.split("/").slice(0, -1).join("/");
+
+      if (oldPath.toLowerCase() !== newPath.toLowerCase()) {
+        log("[INFO]", "Changed file extension or parent folder. No operation needed, doing nothing.");
+        return;
+      }
+
+      // if not a git repo, do nothing
+      const isGitRepo = await HelperFunctions.isGitRepository(oldPathWithoutFilename);
+      if (!isGitRepo) return;
+
+      // get git project root path
+      const gitProjectRoot = await HelperFunctions.execShell("git rev-parse --show-toplevel", oldPathWithoutFilename);
+
+      // get git untracked files
+      const untrackedGitFiles = (
+        await HelperFunctions.execShell(`git -C "${gitProjectRoot}" ls-files --exclude-standard --others`)
+      ).split("\n");
+
+      const oldPathSegments = HelperFunctions.getPathSegments({
+        path: oldPath,
+        gitRoot: gitProjectRoot,
+      });
+
+      const newPathSegments = HelperFunctions.getPathSegments({
+        path: newPath,
+        gitRoot: gitProjectRoot,
+      });
+
+      if (
+        untrackedGitFiles.some(
+          (untrackedFile) =>
+            untrackedFile.toLowerCase() ===
+            HelperFunctions.removeInitialSlash(
+              `${oldPathSegments.directory}/${oldPathSegments.fileName}${oldPathSegments.fileExtension}`
+            ).toLowerCase()
+        )
+      ) {
+        log("[INFO]", "File is not tracked by Git yet. No operation needed, doing nothing.");
+        return;
+      }
+
+      const temporaryFileName = HelperFunctions.generateId();
+      const command = [
+        `git -C "${gitProjectRoot}"`,
+        `mv ".${oldPathSegments.directory}/${oldPathSegments.fileName}${oldPathSegments.fileExtension}"`,
+        `".${oldPathSegments.directory}/${temporaryFileName}${oldPathSegments.fileExtension}"`,
+        `&&`,
+        `git -C "${gitProjectRoot}"`,
+        `mv ".${oldPathSegments.directory}/${temporaryFileName}${oldPathSegments.fileExtension}"`,
+        `".${oldPathSegments.directory}/${newPathSegments.fileName}${newPathSegments.fileExtension}"`,
+      ].join(" ");
+
+      await HelperFunctions.execShell(command);
+
+      log(
+        "[INFO]",
+        `File successfully renamed from '${oldPathSegments.fileName}${oldPathSegments.fileExtension}' to '${newPathSegments.fileName}${newPathSegments.fileExtension}'.`
+      );
+    }
+  } catch (error: any) {
+    log("ERROR:", error.toString());
+
+    const err = error as Awaited<ReturnType<(typeof HelperFunctions)["execShell"]>>;
+    const answer = await vscode.window.showErrorMessage(
+      `${err}\n\nYou can open an issue about it if you want to.`,
+      "Open an issue"
+    );
+
+    if (answer === "Open an issue") {
+      let uri = packageJson.repository.url;
+      uri += "/issues/new";
+      uri += "?title=Uncaught Exception";
+      uri += `&body=ERROR MESSAGE:\n${err}`;
+
+      const encoded = encodeURI(uri);
+      vscode.env.openExternal(vscode.Uri.parse(encoded));
+    }
+  }
+});
+
 export function activate(context: vscode.ExtensionContext) {
   let channel = vscode.window.createOutputChannel("git-watch-vscode-rename");
-  // Use the console to output diagnostic information (console.log) and errors (console.error)
-  // This line of code will only be executed once when your extension is activated
-  log = logger(channel);
-  log("**** Congratulations, your extension 'git-watch-vscode-rename' is now active! ****");
-
-  // The command has been defined in the package.json file
-  // Now provide the implementation of the command with registerCommand
-  // The commandId parameter must match the command field in package.json
-  // The code you place here will be executed every time your command is executed
-
-  const disposable = vscode.workspace.onWillRenameFiles(async (event) => {
-    for (const file of event.files) {
-      const path = removeInitialSlash(file.oldUri.path);
-      const newPath = removeInitialSlash(file.newUri.path);
-
-      const tempPath = path.slice(0, path.lastIndexOf("/"));
-      const isGitRepo = await isGitRepository(tempPath);
-
-      if (path.toLowerCase() === newPath.toLowerCase() && isGitRepo) {
-        const tempName = generateId();
-
-        const oldP = getPathSegments(path);
-        const newP = getPathSegments(newPath);
-
-        const fullTempPath = `${tempName}${oldP.pathExtension}`;
-
-        let command = [
-          "git",
-          `-C ${tempPath}`,
-          `mv ${oldP.finalPathSegment} ${fullTempPath}`,
-          "&&",
-          "git",
-          `-C ${tempPath}`,
-          `mv ${fullTempPath} ${newP.finalPathSegment}`,
-        ].join(" ");
-
-        log(`command to run: ${command}`);
-
-        try {
-          await execShell(command);
-        } catch (error) {
-          const err = error as Awaited<ReturnType<typeof execShell>>;
-          const answer = await vscode.window.showErrorMessage(
-            `${err}\n\nYou can open an issue about it if you want to.`,
-            "Open an issue"
-          );
-
-          if (answer === "Open an issue") {
-            let uri = packageJson.repository.url;
-            uri += "/issues/new";
-            uri += "?title=Uncaught Exception";
-            uri += `&body=ERROR MESSAGE:\n${err}`;
-
-            const encoded = encodeURI(uri);
-            vscode.env.openExternal(vscode.Uri.parse(encoded));
-          }
-        }
-      }
-    }
-  });
-
+  log = HelperFunctions.createLogger(channel);
+  log("Extension is now active!");
   context.subscriptions.push(disposable);
 }
 
-// this method is called when your extension is deactivated
-export function deactivate() {}
+export function deactivate(_context: vscode.ExtensionContext) {}
 
-/* From here to end of the file, it is only helper functions */
-const generateId = () => Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-
-const getFileExtension = (fileExtension: string) => (fileExtension.includes(".") ? fileExtension : "");
-
-const removeInitialSlash = (path: string) => (path.charAt(0) === "/" ? path.slice(1) : path);
-
-const execShell = (cmd: string) => {
-  return new Promise<string>((resolve, reject) => {
-    cp.exec(cmd, (_: any, stdout: string, stderr: string) => {
-      if (stderr) {
-        reject(stderr);
-      } else {
-        resolve(stdout);
-      }
+/* From here to end of the file, there's only helper functions */
+const HelperFunctions = {
+  async execShell(command: string, cwd?: string) {
+    return new Promise<string>((resolve, reject) => {
+      cp.exec(command, { cwd }, (_: any, stdout: string, stderr: string) => {
+        if (stderr) {
+          stderr = stderr.trim();
+          log("[EXECUTING]:", command, "[ERROR]:", stderr);
+          reject(stderr);
+        } else {
+          stdout = stdout.trim();
+          log(
+            "[EXECUTING]:",
+            command,
+            // command execution result
+            stdout && "[RESULT]:",
+            stdout && stdout
+          );
+          resolve(stdout);
+        }
+      });
     });
-  });
-};
+  },
 
-const isGitRepository = async (path: string) => {
-  const command = `git -C ${path} rev-parse --is-inside-work-tree`;
-  log(`command to know if it is inside a GIT repository: ${command}`);
+  async isGitRepository(path: string) {
+    try {
+      const command = `git -C "${path.trim()}" rev-parse --is-inside-work-tree`;
+      const result = await this.execShell(command);
+      const outTrimmed = result.replace(/\r?\n|\r/g, "");
+      return outTrimmed === "true";
+    } catch (error: any) {
+      log("[INFO]", "Not a Git repository. Doing nothing.");
+      return false;
+    }
+  },
 
-  try {
-    const result = await execShell(command);
-    const outTrimmed = result.replace(/\r?\n|\r/g, "");
-    return outTrimmed === "true";
-  } catch (err) {
-    vscode.window.showInformationMessage(
-      `'git mv' command will not be executed, because a Git repository was not found at ${path}`
+  getPathSegments({ path, gitRoot }: { path: string; gitRoot: string }) {
+    const directory = path
+      .replace(new RegExp(`${gitRoot}`, "i"), "")
+      .split("/")
+      .slice(0, -1)
+      .join("/");
+
+    const finalPathSegment = path.split("/").slice(-1).join("/");
+    const splittedFinalPathSegment = finalPathSegment.split(".").slice(-1);
+
+    const lastValueFromSplittedFinalPathSegment = splittedFinalPathSegment[splittedFinalPathSegment.length - 1];
+    const fileExtension = this.getFileExtension(
+      finalPathSegment.length === 1
+        ? lastValueFromSplittedFinalPathSegment
+        : `.${lastValueFromSplittedFinalPathSegment}`
     );
-    return false;
-  }
-};
 
-const getPathSegments = (path: string) => {
-  const pathSegments = path.split("/");
-  const finalPathSegment = pathSegments[pathSegments.length - 1];
-  const splittedFinalPathSegment = pathSegments[pathSegments.length - 1].split(".");
-  const lastValueFromSplittedFinalPathSegment = splittedFinalPathSegment[splittedFinalPathSegment.length - 1];
-  const pathExtension = getFileExtension(
-    finalPathSegment.length === 1 ? lastValueFromSplittedFinalPathSegment : `.${lastValueFromSplittedFinalPathSegment}`
-  );
-  return {
-    finalPathSegment,
-    pathExtension,
-  };
-};
+    const fileName = finalPathSegment.split(".").slice(0, -1).join(".");
 
-export default function logger(channel: vscode.OutputChannel) {
-  return function (str: string) {
-    channel.appendLine(str);
-    channel.appendLine("");
-  };
-}
+    return {
+      directory, // path based on git project root, without file's name/extension
+      fileName,
+      fileExtension,
+    };
+  },
+
+  generateId: () => Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15),
+  getFileExtension: (fileExtension: string) => (fileExtension.includes(".") ? fileExtension : ""),
+  removeInitialSlash: (path: string) => (path.charAt(0) === "/" ? path.slice(1) : path),
+
+  createLogger:
+    (channel: vscode.OutputChannel) =>
+    (...str: string[]) => {
+      str.forEach((s) => {
+        if (s.length === 0) return;
+        channel.appendLine(s);
+      });
+      channel.appendLine("");
+    },
+};
