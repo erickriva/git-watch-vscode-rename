@@ -19,13 +19,18 @@ https://git-scm.com/docs/git-mv
 
 ## Requirements
 
-You must have git installed and the file must be watched by git.
+Git must have been installed and the renamed file need to be watched by it.
 
 ## Usage
 
 Rename file/folder normally as you would. This extension will be watching for file/folder name changes and will run by its own.
 
 ## Release Notes
+
+### 1.1.0
+
+- Bug fixes
+- Detailed logs on extension's output channel
 
 ### 1.0.0
 
